@@ -1,0 +1,12 @@
+{
+  "name": "salty-quiver-stuff",
+  "version": "1.0.0",
+  "description": "[Started with this ChatGPT Session](https://chatgpt.com/share/687ee11f-a890-800f-96e7-a93381812d91)",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC"
+}
