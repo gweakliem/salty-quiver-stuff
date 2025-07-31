@@ -34,3 +34,8 @@ The project consists of two main Python files:
   - Displays screened candidates and fetches options chain for the top result
 
 The screener uses a hardcoded ticker list (AAPL, MSFT, NVDA, AMD, TSLA) and applies momentum-based filtering criteria to identify potential trading opportunities.
+
+## Coding Style
+
+- This project is managed using uv.
+- Use Python type annotations on every method declaration

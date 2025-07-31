@@ -15,6 +15,8 @@ import ta
 import numpy as np
 from math import log, sqrt, exp
 from scipy.stats import norm
+import sqlite3
+from pydantic import BaseModel
 
 # default lists
 default_lists = {
@@ -155,6 +157,39 @@ default_lists = {
 }
 
 
+class ScreeningResult(BaseModel):
+    ticker: str
+    price: float
+    rsi: float
+    macd: float
+    signal: float
+    sma_50: float
+    sma_200: float
+
+
+def init_database(db_path: str) -> None:
+    """Initialize SQLite database with screening results table."""
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS screening_results (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp TEXT NOT NULL,
+            ticker TEXT NOT NULL,
+            price REAL,
+            rsi REAL,
+            macd REAL,
+            macd_signal REAL,
+            sma_50 REAL,
+            sma_200 REAL
+        )
+    """)
+
+    conn.commit()
+    conn.close()
+
+
 def black_scholes_call_delta(S, K, T, r, sigma):
     """Annualized inputs. T in years."""
     if T <= 0 or sigma <= 0:
@@ -265,25 +300,25 @@ def get_target_expiry(stock: yf.Ticker, min_days=30, max_days=45) -> str:
                 break  # take the earliest that fits
         return target_expiry
     except Exception as e:
-        print(f"Error retrieving expiry for {ticker}: {e}")
+        print(f"Error retrieving expiry: {e}")
         return None
 
 
 def screen_tickers(
     tickers: list[str],
-    period: str = "6mo",
+    period: str = "1y",
     interval: str = "1d",
     skip_screen: bool = False,
-) -> list[dict]:
+) -> list[ScreeningResult]:
     """
     Screens tickers for bullish momentum based on MACD and RSI indicators.
-    Returns a list of dictionaries with ticker information.
+    Returns a list of ScreeningResult objects with ticker information.
     """
     screened = []
 
     for ticker in tickers:
         df = yf.download(ticker, period=period, interval=interval, auto_adjust=True)
-        if len(df) < 50:
+        if len(df) < 50:  # TODO: 200?
             continue
 
         # Indicators
@@ -291,27 +326,46 @@ def screen_tickers(
         macd = ta.trend.MACD(df["Close"].squeeze())
         df["macd"] = macd.macd()
         df["macd_signal"] = macd.macd_signal()
+        df["sma_50"] = ta.trend.SMAIndicator(
+            df["Close"].squeeze(), window=50
+        ).sma_indicator()
+        df["sma_200"] = ta.trend.SMAIndicator(
+            df["Close"].squeeze(), window=200
+        ).sma_indicator()
 
-        # Signal Conditions
-        if skip_screen or (
-            df["macd"].iloc[-1] > df["macd_signal"].iloc[-1]
-            and df["macd"].iloc[-2] <= df["macd_signal"].iloc[-2]  # crossover
-            and 50 < df["rsi"].iloc[-1] < 70
-        ):
-            current_price = df["Close"].iloc[-1]
+        current_price = df["Close"].iloc[-1]
+        current_rsi = df["rsi"].iloc[-1]
+        current_macd = df["macd"].iloc[-1]
+        current_signal = df["macd_signal"].iloc[-1]
+        sma_50 = df["sma_50"].iloc[-1]
+        sma_200 = df["sma_200"].iloc[-1]
+
+        # Check screening conditions
+        macd_crossover = (
+            current_macd > current_signal
+            and df["macd"].iloc[-2] <= df["macd_signal"].iloc[-2]
+        )
+        rsi_in_range = 50 < current_rsi < 70
+        passed_screen = skip_screen or (macd_crossover and rsi_in_range)
+
+        # Add to screened results if passed
+        if passed_screen:
             screened.append(
-                {
-                    "Ticker": ticker,
-                    "Price": current_price,
-                    "RSI": round(df["rsi"].iloc[-1], 2),
-                    "MACD": round(df["macd"].iloc[-1], 3),
-                    "Signal": round(df["macd_signal"].iloc[-1], 3),
-                }
+                ScreeningResult(
+                    ticker=ticker,
+                    price=current_price,
+                    rsi=round(current_rsi, 2),
+                    macd=round(current_macd, 3),
+                    signal=round(current_signal, 3),
+                    sma_50=round(sma_50, 2),
+                    sma_200=round(sma_200, 2),
+                )
             )
         else:
             print(
-                f"Skipping {ticker}: MACD={df['macd'].iloc[-1]}, Signal={df['macd_signal'].iloc[-1]}, RSI={df['rsi'].iloc[-1]}"
+                f"Skipping {ticker}: MACD={current_macd}, Signal={current_signal}, RSI={current_rsi}"
             )
+
     return screened
 
 
@@ -357,6 +411,7 @@ def main(
     Screen stocks for bullish momentum using MACD and RSI indicators.
     Find potential candidates for bull call spreads or long calls.
     """
+    db_path = "screener_results.db"
     # Use provided tickers or default to nasdaq_100
     if tickers:
         ticker_list = [ticker.strip().upper() for ticker in tickers.split(",")]
@@ -365,17 +420,50 @@ def main(
 
     screened = screen_tickers(ticker_list, skip_screen=skip_screen)
     # Display screened tickers
-    screen_df = pd.DataFrame(screened)
+    screen_df = pd.DataFrame([result.model_dump() for result in screened])
     print("📈 Bullish Momentum Candidates:")
     print(screen_df)
 
     # Options chain for all screened tickers
     if not screen_df.empty:
-        for index, row in screen_df.iterrows():
-            ticker = row["Ticker"]
-            print(f"\n🔍 Fetching options for {ticker}")
-            stock = yf.Ticker(ticker)
+        timestamp = datetime.now().isoformat()
 
+        # Initialize database
+        init_database(db_path)
+        conn = sqlite3.connect(db_path)
+        cursor = conn.cursor()
+        for result in screened:
+            ticker = result.ticker
+            stock = yf.Ticker(ticker)
+            current_price = result.price
+            current_rsi = result.rsi
+            current_macd = result.macd
+            current_signal = result.signal
+            sma_50 = result.sma_50
+            sma_200 = result.sma_200
+            print(
+                f"Inserting result {ticker}: {current_price}, {current_rsi}, {current_macd}, {current_signal}, {sma_50}, {sma_200}"
+            )
+            # Insert screening result into database
+            cursor.execute(
+                """
+                INSERT INTO screening_results 
+                (timestamp, ticker, price, rsi, macd, macd_signal, sma_50, sma_200)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+                (
+                    timestamp,
+                    ticker,
+                    current_price,
+                    current_rsi,
+                    current_macd,
+                    current_signal,
+                    sma_50,
+                    sma_200,
+                ),
+            )
+
+            print(f"\n🔍 Fetching options for {ticker}")
             try:
                 expiry = get_target_expiry(stock, min_expiry, max_expiry)
                 if expiry:
@@ -390,6 +478,8 @@ def main(
                     print(f"⚠️ No suitable expiry found for {ticker}")
             except Exception as e:
                 print(f"❌ Could not fetch options for {ticker}: {e}")
+        conn.commit()
+        conn.close()
 
 
 if __name__ == "__main__":
