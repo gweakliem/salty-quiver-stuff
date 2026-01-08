@@ -285,7 +285,7 @@ def pick_call_strike(
     ]
 
 
-def get_target_expiry(stock: yf.Ticker, min_days=30, max_days=45) -> str:
+def get_target_expiry(stock: yf.Ticker, min_days=30, max_days=45) -> str | None:
     try:
         expirations = stock.options
         today = datetime.today()
@@ -373,6 +373,7 @@ def screen_tickers(
 @click.option(
     "--tickers",
     "-t",
+    default="nasdaq_100",
     help="Comma-separated list of tickers to screen (overrides default nasdaq_100)",
     type=str,
 )
@@ -385,15 +386,15 @@ def screen_tickers(
 )
 @click.option(
     "--min-expiry",
-    default=270,
+    default=30,
     type=int,
-    help="Minimum days to expiry for options (default: 270, i.e., LEAPS)",
+    help="Minimum days to expiry for options (default: 30)",
 )
 @click.option(
     "--max-expiry",
-    default=720,
+    default=45,
     type=int,
-    help="Maximum days to expiry for options (default: 720, i.e., LEAPS)",
+    help="Maximum days to expiry for options (default: 45)",
 )
 @click.option(
     "--skip-screen",
@@ -401,22 +402,23 @@ def screen_tickers(
     help="Skip the screening step, just apply options selection",
 )
 def main(
-    tickers: list[str],
+    tickers: list[str] | None,
     target_delta: float,
-    min_expiry: str,
-    max_expiry: str,
+    min_expiry: int,
+    max_expiry: int,
     skip_screen: bool,
 ):
     """
     Screen stocks for bullish momentum using MACD and RSI indicators.
     Find potential candidates for bull call spreads or long calls.
     """
+    if min_expiry >= max_expiry:
+        click.echo("min_expiry must be <= max_expiry")
+        sys.exit(1)
+
     db_path = "screener_results.db"
-    # Use provided tickers or default to nasdaq_100
-    if tickers:
-        ticker_list = [ticker.strip().upper() for ticker in tickers.split(",")]
-    else:
-        ticker_list = default_lists["nasdaq_100"]
+
+    ticker_list = [ticker.strip().upper() for ticker in tickers.split(",")]
 
     screened = screen_tickers(ticker_list, skip_screen=skip_screen)
     # Display screened tickers
@@ -472,6 +474,9 @@ def main(
                 ),
             )
 
+            print(
+                f"Screening for expirations between {min_expiry} and {max_expiry} days out"
+            )
             try:
                 expiry = get_target_expiry(stock, min_expiry, max_expiry)
                 if expiry:
@@ -480,39 +485,60 @@ def main(
                     )
                     if best_call is not None:
                         # Format the trade recommendation
-                        print(f"┌─ {ticker} Trade Recommendation " + "─" * (80 - len(ticker) - 26))
-                        print(f"│")
-                        print(f"│ 📊 STOCK INFO")
+                        print(
+                            f"┌─ {ticker} Trade Recommendation "
+                            + "─" * (80 - len(ticker) - 26)
+                        )
+                        print("│")
+                        print("│ 📊 STOCK INFO")
                         print(f"│   Current Price: ${current_price:.2f}")
                         print(f"│   RSI: {current_rsi:.1f} (bullish momentum)")
-                        print(f"│   MACD: {current_macd:.3f} > Signal: {current_signal:.3f} ✓")
-                        print(f"│")
-                        print(f"│ 🎯 RECOMMENDED TRADE")
-                        print(f"│   BUY TO OPEN: {ticker} ${best_call['strike']:.2f} Call")
-                        print(f"│   Expiration: {expiry} ({best_call['days_to_exp']:.0f} days)")
-                        print(f"│")
-                        print(f"│ 💰 PRICING")
+                        print(
+                            f"│   MACD: {current_macd:.3f} > Signal: {current_signal:.3f} ✓"
+                        )
+                        print("│")
+                        print("│ 🎯 RECOMMENDED TRADE")
+                        print(
+                            f"│   BUY TO OPEN: {ticker} ${best_call['strike']:.2f} Call"
+                        )
+                        print(
+                            f"│   Expiration: {expiry} ({best_call['days_to_exp']:.0f} days)"
+                        )
+                        print("│")
+                        print("│ 💰 PRICING")
                         print(f"│   Option Price: ${best_call['mid']:.2f} (mid)")
-                        print(f"│   Bid/Ask: ${best_call['bid']:.2f} / ${best_call['ask']:.2f}")
+                        print(
+                            f"│   Bid/Ask: ${best_call['bid']:.2f} / ${best_call['ask']:.2f}"
+                        )
                         print(f"│   Last Trade: ${best_call['lastPrice']:.2f}")
-                        print(f"│")
-                        print(f"│ 📈 GREEKS & METRICS")
-                        print(f"│   Delta: {best_call['delta']:.3f} (~{best_call['delta']*100:.0f}% prob ITM)")
-                        print(f"│   Implied Vol: {best_call['impliedVolatility']*100:.1f}%")
-                        print(f"│   Breakeven: ${best_call['breakeven']:.2f} ({best_call['breakeven_pct']:+.1f}% from current)")
-                        print(f"│")
-                        print(f"│ 🔊 LIQUIDITY")
+                        print("│")
+                        print("│ 📈 GREEKS & METRICS")
+                        print(
+                            f"│   Delta: {best_call['delta']:.3f} (~{best_call['delta'] * 100:.0f}% prob ITM)"
+                        )
+                        print(
+                            f"│   Implied Vol: {best_call['impliedVolatility'] * 100:.1f}%"
+                        )
+                        print(
+                            f"│   Breakeven: ${best_call['breakeven']:.2f} ({best_call['breakeven_pct']:+.1f}% from current)"
+                        )
+                        print("│")
+                        print("│ 🔊 LIQUIDITY")
                         print(f"│   Volume: {best_call['volume']:.0f}")
                         print(f"│   Open Interest: {best_call['openInterest']:.0f}")
-                        print(f"└" + "─" * 79)
+                        print("└" + "─" * 79)
                         print()
                     else:
                         print(f"⚠️  {ticker}: No suitable call found for {expiry}")
-                        print(f"   (No options met liquidity requirements: min 100 volume, 100 OI)")
+                        print(
+                            "   (No options met liquidity requirements: min 100 volume, 100 OI)"
+                        )
                         print()
                 else:
                     print(f"⚠️  {ticker}: No suitable expiry found")
-                    print(f"   (Looking for expiration between {min_expiry}-{max_expiry} days)")
+                    print(
+                        f"   (Looking for expiration between {min_expiry}-{max_expiry} days)"
+                    )
                     print()
             except Exception as e:
                 print(f"❌ {ticker}: Could not fetch options - {e}")
