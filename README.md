@@ -60,3 +60,10 @@ uv run pre-commit install
 * Add dynamic lists using the screener in yfinance.EquityQuery
 * Try new strategy, maybe index with 3 days of down volume -> buy puts
 * MACD cross signal should happen in negative territory
+
+
+https://www.marketdata.app/api/options/option-chain-api/
+
+
+https://site.financialmodelingprep.com/developer/docs#full-quote-quote
+

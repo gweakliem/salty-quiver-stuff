@@ -385,15 +385,15 @@ def screen_tickers(
 )
 @click.option(
     "--min-expiry",
-    default=30,
+    default=270,
     type=int,
-    help="Minimum days to expiry for options (default: 30)",
+    help="Minimum days to expiry for options (default: 270, i.e., LEAPS)",
 )
 @click.option(
     "--max-expiry",
-    default=45,
+    default=720,
     type=int,
-    help="Maximum days to expiry for options (default: 45)",
+    help="Maximum days to expiry for options (default: 720, i.e., LEAPS)",
 )
 @click.option(
     "--skip-screen",
@@ -421,8 +421,14 @@ def main(
     screened = screen_tickers(ticker_list, skip_screen=skip_screen)
     # Display screened tickers
     screen_df = pd.DataFrame([result.model_dump() for result in screened])
-    print("📈 Bullish Momentum Candidates:")
-    print(screen_df)
+    print("\n" + "=" * 80)
+    print("📈 BULLISH MOMENTUM CANDIDATES")
+    print("=" * 80)
+    if not screen_df.empty:
+        print(screen_df.to_string(index=False))
+    else:
+        print("No stocks passed the screening criteria.")
+    print("=" * 80 + "\n")
 
     # Options chain for all screened tickers
     if not screen_df.empty:
@@ -432,6 +438,11 @@ def main(
         init_database(db_path)
         conn = sqlite3.connect(db_path)
         cursor = conn.cursor()
+
+        print("=" * 80)
+        print("🎯 TRADE RECOMMENDATIONS")
+        print("=" * 80 + "\n")
+
         for result in screened:
             ticker = result.ticker
             stock = yf.Ticker(ticker)
@@ -441,13 +452,11 @@ def main(
             current_signal = result.signal
             sma_50 = result.sma_50
             sma_200 = result.sma_200
-            print(
-                f"Inserting result {ticker}: {current_price}, {current_rsi}, {current_macd}, {current_signal}, {sma_50}, {sma_200}"
-            )
+
             # Insert screening result into database
             cursor.execute(
                 """
-                INSERT INTO screening_results 
+                INSERT INTO screening_results
                 (timestamp, ticker, price, rsi, macd, macd_signal, sma_50, sma_200)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
@@ -463,7 +472,6 @@ def main(
                 ),
             )
 
-            print(f"\n🔍 Fetching options for {ticker}")
             try:
                 expiry = get_target_expiry(stock, min_expiry, max_expiry)
                 if expiry:
@@ -471,15 +479,51 @@ def main(
                         stock, expiry, target_delta=target_delta
                     )
                     if best_call is not None:
-                        print(f"{ticker} {expiry} {best_call.to_dict()}")
+                        # Format the trade recommendation
+                        print(f"┌─ {ticker} Trade Recommendation " + "─" * (80 - len(ticker) - 26))
+                        print(f"│")
+                        print(f"│ 📊 STOCK INFO")
+                        print(f"│   Current Price: ${current_price:.2f}")
+                        print(f"│   RSI: {current_rsi:.1f} (bullish momentum)")
+                        print(f"│   MACD: {current_macd:.3f} > Signal: {current_signal:.3f} ✓")
+                        print(f"│")
+                        print(f"│ 🎯 RECOMMENDED TRADE")
+                        print(f"│   BUY TO OPEN: {ticker} ${best_call['strike']:.2f} Call")
+                        print(f"│   Expiration: {expiry} ({best_call['days_to_exp']:.0f} days)")
+                        print(f"│")
+                        print(f"│ 💰 PRICING")
+                        print(f"│   Option Price: ${best_call['mid']:.2f} (mid)")
+                        print(f"│   Bid/Ask: ${best_call['bid']:.2f} / ${best_call['ask']:.2f}")
+                        print(f"│   Last Trade: ${best_call['lastPrice']:.2f}")
+                        print(f"│")
+                        print(f"│ 📈 GREEKS & METRICS")
+                        print(f"│   Delta: {best_call['delta']:.3f} (~{best_call['delta']*100:.0f}% prob ITM)")
+                        print(f"│   Implied Vol: {best_call['impliedVolatility']*100:.1f}%")
+                        print(f"│   Breakeven: ${best_call['breakeven']:.2f} ({best_call['breakeven_pct']:+.1f}% from current)")
+                        print(f"│")
+                        print(f"│ 🔊 LIQUIDITY")
+                        print(f"│   Volume: {best_call['volume']:.0f}")
+                        print(f"│   Open Interest: {best_call['openInterest']:.0f}")
+                        print(f"└" + "─" * 79)
+                        print()
                     else:
-                        print(f"⚠️ No suitable call found for {ticker} on {expiry}")
+                        print(f"⚠️  {ticker}: No suitable call found for {expiry}")
+                        print(f"   (No options met liquidity requirements: min 100 volume, 100 OI)")
+                        print()
                 else:
-                    print(f"⚠️ No suitable expiry found for {ticker}")
+                    print(f"⚠️  {ticker}: No suitable expiry found")
+                    print(f"   (Looking for expiration between {min_expiry}-{max_expiry} days)")
+                    print()
             except Exception as e:
-                print(f"❌ Could not fetch options for {ticker}: {e}")
+                print(f"❌ {ticker}: Could not fetch options - {e}")
+                print()
+
         conn.commit()
         conn.close()
+
+        print("=" * 80)
+        print("✅ Screening complete. Results saved to database.")
+        print("=" * 80)
 
 
 if __name__ == "__main__":
