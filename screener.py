@@ -6,19 +6,23 @@
         •	Shows first expiration’s call chain for your inspection
 """
 
+import os
+import sqlite3
+import sys
 from datetime import datetime, timedelta
-import click
+from math import exp, log, sqrt
+from pathlib import Path
 from pprint import pprint
-import yfinance as yf
+
+import click
+import numpy as np
 import pandas as pd
 import ta
-import numpy as np
-from math import log, sqrt, exp
-from scipy.stats import norm
-import sqlite3
+import yfinance as yf
 from pydantic import BaseModel
+from scipy.stats import norm
 
-# default lists
+# fallback static lists (used only if live fetch and cache both fail)
 default_lists = {
     "genz": [
         "OPEN",
@@ -152,9 +156,118 @@ default_lists = {
         "WDAY",
         "XEL",
         "ZS",
-        "QQQ",
     ],
 }
+
+INDEX_SOURCES = {
+    "sp500": "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies",
+    "nasdaq_100": "https://en.wikipedia.org/wiki/Nasdaq-100",
+}
+
+# Alternate CSV mirrors for S&P 500 (useful when Wikipedia blocks scraping)
+SP500_CSV_FALLBACKS = [
+    "https://raw.githubusercontent.com/datasets/s-and-p-500-companies/master/data/constituents.csv",
+    "https://datahub.io/core/s-and-p-500-companies/r/constituents.csv",
+]
+
+CACHE_DIR = Path(".cache/index_constituents")
+
+
+def _normalize_ticker(ticker: str) -> str:
+    """Normalize tickers (e.g., BRK.B → BRK-B) for consistency across data sources."""
+
+    return ticker.strip().upper().replace(".", "-")
+
+
+def _save_cache(index_name: str, tickers: list[str]) -> None:
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    cache_path = CACHE_DIR / f"{index_name}.txt"
+    cache_path.write_text("\n".join(tickers), encoding="utf-8")
+
+
+def _load_cache(index_name: str) -> list[str]:
+    cache_path = CACHE_DIR / f"{index_name}.txt"
+    if cache_path.exists():
+        return [_normalize_ticker(line) for line in cache_path.read_text(encoding="utf-8").splitlines() if line]
+    return []
+
+
+def _fetch_sp500() -> list[str]:
+    # Primary: Wikipedia (allow custom UA to avoid some 403 blocks)
+    try:
+        tables = pd.read_html(
+            INDEX_SOURCES["sp500"],
+            storage_options={"User-Agent": "Mozilla/5.0 (compatible; CodexBot/1.0)"},
+        )
+        tickers = tables[0]["Symbol"].tolist()
+        return [_normalize_ticker(t) for t in tickers]
+    except Exception as exc:  # noqa: BLE001
+        print(f"⚠️  Wikipedia S&P 500 scrape failed: {exc}")
+
+    # Secondary: CSV mirrors
+    for url in SP500_CSV_FALLBACKS:
+        try:
+            df = pd.read_csv(url)
+            col = "Symbol" if "Symbol" in df.columns else df.columns[0]
+            tickers = df[col].tolist()
+            return [_normalize_ticker(t) for t in tickers]
+        except Exception as exc:  # noqa: BLE001
+            print(f"⚠️  Fallback CSV fetch failed ({url}): {exc}")
+
+    raise RuntimeError("All S&P 500 sources failed")
+
+
+def _fetch_nasdaq_100() -> list[str]:
+    tables = pd.read_html(INDEX_SOURCES["nasdaq_100"])
+    table = next(
+        tbl for tbl in tables if any(col in tbl.columns for col in ("Ticker", "Symbol"))
+    )
+    col = "Ticker" if "Ticker" in table.columns else "Symbol"
+    return [_normalize_ticker(t) for t in table[col].tolist()]
+
+
+def get_index_constituents(index_name: str) -> list[str]:
+    """Fetch index constituents with caching and fallbacks.
+
+    Order of preference:
+    1) Live scrape from Wikipedia (keeps list current).
+    2) Cached list from previous successful run.
+    3) Hard-coded defaults (only for lists we ship).
+    """
+
+    index_name = index_name.lower()
+    fetchers = {
+        "sp500": _fetch_sp500,
+        "nasdaq_100": _fetch_nasdaq_100,
+        "genz": lambda: default_lists["genz"],
+    }
+
+    if index_name not in fetchers:
+        raise ValueError(f"Unknown index '{index_name}'")
+
+    tickers: list[str] = []
+
+    # Try live fetch
+    try:
+        tickers = fetchers[index_name]()
+        if tickers:
+            _save_cache(index_name, tickers)
+            return tickers
+    except Exception as exc:  # noqa: BLE001
+        print(f"⚠️  Could not refresh {index_name} constituents live: {exc}")
+
+    # Fallback to cache
+    cached = _load_cache(index_name)
+    if cached:
+        print(f"Using cached list for {index_name} (live refresh failed).")
+        return cached
+
+    # Fallback to hard-coded defaults
+    if index_name in default_lists:
+        print(f"Using built-in default list for {index_name} (no cache available).")
+        return default_lists[index_name]
+
+    raise RuntimeError(f"No tickers available for index '{index_name}'")
 
 
 class ScreeningResult(BaseModel):
@@ -205,6 +318,7 @@ def pick_call_strike(
     min_volume: float = 100,
     min_oi: float = 100,
     risk_free_rate: float = 0.045,
+    delta_window: tuple[float, float] | None = (0.35, 0.75),
 ):
     """
     Picks the best call option strike for a given ticker and expiry.
@@ -249,7 +363,16 @@ def pick_call_strike(
     calls["delta_diff"] = (calls["delta"] - target_delta).abs()
     calls = calls.sort_values("delta_diff")
 
-    best = calls.iloc[0].copy()
+    # Prefer strikes inside delta window; otherwise accept closest overall
+    if delta_window:
+        low, high = delta_window
+        in_window = calls[(calls["delta"] >= low) & (calls["delta"] <= high)]
+        if not in_window.empty:
+            best = in_window.iloc[0].copy()
+        else:
+            return None
+    else:
+        best = calls.iloc[0].copy()
 
     # Breakeven if held to expiration
     ask = best.get("ask", np.nan)
@@ -305,7 +428,7 @@ def get_target_expiry(stock: yf.Ticker, min_days=30, max_days=45) -> str | None:
 
 
 def screen_tickers(
-    tickers: list[str],
+    tickers: str,
     period: str = "1y",
     interval: str = "1d",
     skip_screen: bool = False,
@@ -373,9 +496,16 @@ def screen_tickers(
 @click.option(
     "--tickers",
     "-t",
-    default="nasdaq_100",
-    help="Comma-separated list of tickers to screen (overrides default nasdaq_100)",
+    help="Comma-separated list of tickers to screen (overrides --index list)",
     type=str,
+)
+@click.option(
+    "--index",
+    "index_name",
+    default="nasdaq_100",
+    type=click.Choice(["nasdaq_100", "sp500", "genz"], case_sensitive=False),
+    show_default=True,
+    help="Use a dynamic list from the given index",
 )
 @click.option(
     "--target-delta",
@@ -383,6 +513,20 @@ def screen_tickers(
     default=0.60,
     type=float,
     help="Target delta for options selection (default: 0.60)",
+)
+@click.option(
+    "--min-delta",
+    default=0.35,
+    show_default=True,
+    type=float,
+    help="Lower bound for acceptable option delta (set 0 to disable)",
+)
+@click.option(
+    "--max-delta",
+    default=0.75,
+    show_default=True,
+    type=float,
+    help="Upper bound for acceptable option delta (set 1 to disable)",
 )
 @click.option(
     "--min-expiry",
@@ -403,7 +547,10 @@ def screen_tickers(
 )
 def main(
     tickers: list[str] | None,
+    index_name: str,
     target_delta: float,
+    min_delta: float,
+    max_delta: float,
     min_expiry: int,
     max_expiry: int,
     skip_screen: bool,
@@ -418,7 +565,10 @@ def main(
 
     db_path = "screener_results.db"
 
-    ticker_list = [ticker.strip().upper() for ticker in tickers.split(",")]
+    if tickers:
+        ticker_list = [_normalize_ticker(ticker) for ticker in tickers.split(",")]
+    else:
+        ticker_list = get_index_constituents(index_name)
 
     screened = screen_tickers(ticker_list, skip_screen=skip_screen)
     # Display screened tickers
@@ -480,8 +630,15 @@ def main(
             try:
                 expiry = get_target_expiry(stock, min_expiry, max_expiry)
                 if expiry:
+                    delta_window = None
+                    if 0 < min_delta <= max_delta < 1:
+                        delta_window = (min_delta, max_delta)
+
                     best_call = pick_call_strike(
-                        stock, expiry, target_delta=target_delta
+                        stock,
+                        expiry,
+                        target_delta=target_delta,
+                        delta_window=delta_window,
                     )
                     if best_call is not None:
                         # Format the trade recommendation
