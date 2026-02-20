@@ -6,13 +6,11 @@
         •	Shows first expiration’s call chain for your inspection
 """
 
-import os
 import sqlite3
 import sys
-from datetime import datetime, timedelta
-from math import exp, log, sqrt
+from datetime import datetime
+from html import escape
 from pathlib import Path
-from pprint import pprint
 
 import click
 import numpy as np
@@ -171,6 +169,7 @@ SP500_CSV_FALLBACKS = [
 ]
 
 CACHE_DIR = Path(".cache/index_constituents")
+REPORTS_DIR = Path("reports")
 
 
 def _normalize_ticker(ticker: str) -> str:
@@ -188,7 +187,11 @@ def _save_cache(index_name: str, tickers: list[str]) -> None:
 def _load_cache(index_name: str) -> list[str]:
     cache_path = CACHE_DIR / f"{index_name}.txt"
     if cache_path.exists():
-        return [_normalize_ticker(line) for line in cache_path.read_text(encoding="utf-8").splitlines() if line]
+        return [
+            _normalize_ticker(line)
+            for line in cache_path.read_text(encoding="utf-8").splitlines()
+            if line
+        ]
     return []
 
 
@@ -427,6 +430,138 @@ def get_target_expiry(stock: yf.Ticker, min_days=30, max_days=45) -> str | None:
         return None
 
 
+def fidelity_chart_url(ticker: str) -> str:
+    return (
+        "https://digital.fidelity.com/prgw/digital/research/quote/dashboard/chart"
+        f"?symbol={ticker}"
+    )
+
+
+def _fmt_value(value: float | int | str | None, fmt: str = "", suffix: str = "") -> str:
+    if value is None or pd.isna(value):
+        return "-"
+    if isinstance(value, float | np.floating | int | np.integer):
+        if fmt:
+            return f"{value:{fmt}}{suffix}"
+        return f"{value}{suffix}"
+    return f"{value}{suffix}"
+
+
+def write_html_review_sheet(
+    report_path: Path,
+    generated_at: datetime,
+    index_name: str,
+    min_expiry: int,
+    max_expiry: int,
+    target_delta: float,
+    min_delta: float,
+    max_delta: float,
+    rows: list[dict[str, str | float | int | None]],
+) -> None:
+    """Write a single-file HTML review sheet for charting and trade triage."""
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+
+    table_rows: list[str] = []
+    for row in rows:
+        trade = row.get("trade")
+        table_rows.append(
+            "<tr>"
+            f"<td>{escape(str(row['ticker']))}</td>"
+            f"<td>{_fmt_value(row.get('price'), '.2f')}</td>"
+            f"<td>{_fmt_value(row.get('rsi'), '.1f')}</td>"
+            f"<td>{_fmt_value(row.get('macd'), '.3f')}</td>"
+            f"<td>{_fmt_value(row.get('signal'), '.3f')}</td>"
+            f"<td>{escape(str(row.get('status', '-')))}</td>"
+            f"<td>{escape(str(row.get('expiry', '-')))}</td>"
+            f"<td>{escape(str(trade if trade else '-'))}</td>"
+            f"<td>{_fmt_value(row.get('strike'), '.2f')}</td>"
+            f"<td>{_fmt_value(row.get('delta'), '.3f')}</td>"
+            f"<td>{_fmt_value(row.get('iv_pct'), '.1f', '%')}</td>"
+            f"<td>{_fmt_value(row.get('mid'), '.2f')}</td>"
+            f"<td>{_fmt_value(row.get('volume'), '.0f')}</td>"
+            f"<td>{_fmt_value(row.get('open_interest'), '.0f')}</td>"
+            f"<td>{_fmt_value(row.get('breakeven'), '.2f')}</td>"
+            f'<td><a href="{escape(str(row["fidelity_url"]))}"'
+            ' target="_blank" rel="noopener noreferrer">Open</a></td>'
+            "</tr>"
+        )
+
+    if not table_rows:
+        table_rows.append(
+            '<tr><td colspan="16">No tickers passed the screen in this run.</td></tr>'
+        )
+
+    html = f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Screener Review Sheet</title>
+  <style>
+    body {{
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      margin: 20px;
+      color: #111;
+    }}
+    h1 {{ margin: 0 0 8px 0; }}
+    .meta {{ margin: 0 0 16px 0; color: #444; }}
+    table {{
+      border-collapse: collapse;
+      width: 100%;
+      font-size: 13px;
+    }}
+    th, td {{
+      border: 1px solid #ddd;
+      padding: 6px 8px;
+      text-align: left;
+      white-space: nowrap;
+    }}
+    th {{ background: #f3f4f6; position: sticky; top: 0; }}
+    tr:nth-child(even) {{ background: #fafafa; }}
+    .wrap {{ overflow-x: auto; }}
+  </style>
+</head>
+<body>
+  <h1>Screener Review Sheet</h1>
+  <p class="meta">
+    Generated: {generated_at.strftime("%Y-%m-%d %H:%M:%S")}<br>
+    Universe: {escape(index_name)}<br>
+    Expiry Window: {min_expiry} to {max_expiry} days<br>
+    Target Delta: {target_delta:.2f} | Delta Bounds: {min_delta:.2f} to {max_delta:.2f}
+  </p>
+  <div class="wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Ticker</th>
+          <th>Price</th>
+          <th>RSI</th>
+          <th>MACD</th>
+          <th>Signal</th>
+          <th>Status</th>
+          <th>Expiry</th>
+          <th>Trade</th>
+          <th>Strike</th>
+          <th>Delta</th>
+          <th>IV</th>
+          <th>Mid</th>
+          <th>Volume</th>
+          <th>OI</th>
+          <th>Breakeven</th>
+          <th>Fidelity</th>
+        </tr>
+      </thead>
+      <tbody>
+        {"".join(table_rows)}
+      </tbody>
+    </table>
+  </div>
+</body>
+</html>
+"""
+    report_path.write_text(html, encoding="utf-8")
+
+
 def screen_tickers(
     tickers: str,
     period: str = "1y",
@@ -563,7 +698,11 @@ def main(
         click.echo("min_expiry must be <= max_expiry")
         sys.exit(1)
 
+    run_timestamp = datetime.now()
     db_path = "screener_results.db"
+    report_path = (
+        REPORTS_DIR / f"screening_review_{run_timestamp.strftime('%Y%m%d_%H%M%S')}.html"
+    )
 
     if tickers:
         ticker_list = [_normalize_ticker(ticker) for ticker in tickers.split(",")]
@@ -582,9 +721,11 @@ def main(
         print("No stocks passed the screening criteria.")
     print("=" * 80 + "\n")
 
+    review_rows: list[dict[str, str | float | int | None]] = []
+
     # Options chain for all screened tickers
     if not screen_df.empty:
-        timestamp = datetime.now().isoformat()
+        timestamp = run_timestamp.isoformat()
 
         # Initialize database
         init_database(db_path)
@@ -604,6 +745,24 @@ def main(
             current_signal = result.signal
             sma_50 = result.sma_50
             sma_200 = result.sma_200
+            review_row: dict[str, str | float | int | None] = {
+                "ticker": ticker,
+                "price": current_price,
+                "rsi": current_rsi,
+                "macd": current_macd,
+                "signal": current_signal,
+                "status": "Pending options check",
+                "expiry": None,
+                "trade": None,
+                "strike": None,
+                "delta": None,
+                "iv_pct": None,
+                "mid": None,
+                "volume": None,
+                "open_interest": None,
+                "breakeven": None,
+                "fidelity_url": fidelity_chart_url(ticker),
+            }
 
             # Insert screening result into database
             cursor.execute(
@@ -630,6 +789,7 @@ def main(
             try:
                 expiry = get_target_expiry(stock, min_expiry, max_expiry)
                 if expiry:
+                    review_row["expiry"] = expiry
                     delta_window = None
                     if 0 < min_delta <= max_delta < 1:
                         delta_window = (min_delta, max_delta)
@@ -641,6 +801,19 @@ def main(
                         delta_window=delta_window,
                     )
                     if best_call is not None:
+                        review_row["status"] = "Trade candidate"
+                        review_row["trade"] = (
+                            f"BUY TO OPEN {ticker} ${best_call['strike']:.2f} Call"
+                        )
+                        review_row["strike"] = float(best_call["strike"])
+                        review_row["delta"] = float(best_call["delta"])
+                        review_row["iv_pct"] = float(
+                            best_call["impliedVolatility"] * 100
+                        )
+                        review_row["mid"] = float(best_call["mid"])
+                        review_row["volume"] = float(best_call["volume"])
+                        review_row["open_interest"] = float(best_call["openInterest"])
+                        review_row["breakeven"] = float(best_call["breakeven"])
                         # Format the trade recommendation
                         print(
                             f"┌─ {ticker} Trade Recommendation "
@@ -686,20 +859,25 @@ def main(
                         print("└" + "─" * 79)
                         print()
                     else:
+                        review_row["status"] = "No suitable call for filters"
                         print(f"⚠️  {ticker}: No suitable call found for {expiry}")
                         print(
-                            "   (No options met liquidity requirements: min 100 volume, 100 OI)"
+                            "   (No options met liquidity and/or delta-window filters)"
                         )
                         print()
                 else:
+                    review_row["status"] = "No expiry in selected DTE range"
                     print(f"⚠️  {ticker}: No suitable expiry found")
                     print(
                         f"   (Looking for expiration between {min_expiry}-{max_expiry} days)"
                     )
                     print()
             except Exception as e:
+                review_row["status"] = f"Options fetch error: {e}"
                 print(f"❌ {ticker}: Could not fetch options - {e}")
                 print()
+            finally:
+                review_rows.append(review_row)
 
         conn.commit()
         conn.close()
@@ -707,6 +885,19 @@ def main(
         print("=" * 80)
         print("✅ Screening complete. Results saved to database.")
         print("=" * 80)
+
+    write_html_review_sheet(
+        report_path=report_path,
+        generated_at=run_timestamp,
+        index_name=index_name,
+        min_expiry=min_expiry,
+        max_expiry=max_expiry,
+        target_delta=target_delta,
+        min_delta=min_delta,
+        max_delta=max_delta,
+        rows=review_rows,
+    )
+    print(f"📝 HTML review sheet written to: {report_path}")
 
 
 if __name__ == "__main__":
