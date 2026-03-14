@@ -12,3 +12,4 @@ wheels/
 # Local artifacts
 .cache/
 screener_results.db
+reports/

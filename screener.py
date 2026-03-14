@@ -52,6 +52,27 @@ default_lists = {
         "RIVN",
         "LCID",
     ],
+    "indexes": [
+        "QQQ",
+        "SPY",
+        "MDY",
+        "IJR",
+        "VOX",
+        "VDC",
+        "VCRB",
+        "BNDP",
+        "VIG",
+        "VDE",
+        "EDV",
+        "VSS",
+        "VEU",
+        "VEA",
+        "VWO",
+        "VGK",
+        "VUG",
+        "VHT",
+        "VYM",
+    ],
     "nasdaq_100": [
         "ADBE",
         "AMD",
@@ -242,6 +263,7 @@ def get_index_constituents(index_name: str) -> list[str]:
     fetchers = {
         "sp500": _fetch_sp500,
         "nasdaq_100": _fetch_nasdaq_100,
+        "indexes": lambda: default_lists["indexes"],
         "genz": lambda: default_lists["genz"],
     }
 
@@ -638,7 +660,7 @@ def screen_tickers(
     "--index",
     "index_name",
     default="nasdaq_100",
-    type=click.Choice(["nasdaq_100", "sp500", "genz"], case_sensitive=False),
+    type=click.Choice(["nasdaq_100", "sp500", "genz", "indexes"], case_sensitive=False),
     show_default=True,
     help="Use a dynamic list from the given index",
 )
