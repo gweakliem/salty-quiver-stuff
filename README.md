@@ -67,3 +67,7 @@ https://www.marketdata.app/api/options/option-chain-api/
 
 https://site.financialmodelingprep.com/developer/docs#full-quote-quote
 
+I found some data files with tickers listed on NYSE and other exchanges, this seems to represent pretty much the full universe of US-listed equities. They're downloaded as nyse_listed.csv and other_listed.csv.
+Source: https://datahub.io/core/nyse-other-listings
+
+https://www.nasdaqtrader.com/trader.aspx?id=symboldirdefs 

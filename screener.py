@@ -11,6 +11,7 @@ import sys
 from datetime import datetime
 from html import escape
 from pathlib import Path
+from typing import Any, Callable, TypedDict
 
 import click
 import numpy as np
@@ -176,6 +177,32 @@ default_lists = {
         "XEL",
         "ZS",
     ],
+    "iraq": [
+        "LNG",
+        "VG",
+        "GLNG",
+        "NEXT",
+        "XOM",
+        "CVX",
+        "COP",
+        "KMI",
+        "EQT",
+        "DVN",
+        "MPC",
+        "PSX",
+        "OXY",
+        "FANG",
+        "NTR",
+        "MOS",
+        "CF",
+        "IPI",
+        "UAN",
+        "ICL",
+        "LIN",
+        "APD",
+        "NEHC",
+        "FCX"
+        ]
 }
 
 INDEX_SOURCES = {
@@ -265,6 +292,7 @@ def get_index_constituents(index_name: str) -> list[str]:
         "nasdaq_100": _fetch_nasdaq_100,
         "indexes": lambda: default_lists["indexes"],
         "genz": lambda: default_lists["genz"],
+        "iraq": lambda: default_lists["iraq"],
     }
 
     if index_name not in fetchers:
@@ -584,16 +612,151 @@ def write_html_review_sheet(
     report_path.write_text(html, encoding="utf-8")
 
 
+class StrategyResult(TypedDict):
+    """Result of applying a screening strategy to a DataFrame of OHLCV data."""
+
+    passed: bool
+    label: str
+    extra: dict[str, Any]
+
+
+StrategyFn = Callable[[pd.DataFrame], StrategyResult]
+
+
+def macd_rsi_momentum_strategy(df: pd.DataFrame) -> StrategyResult:
+    """Strategy 1: MACD bullish crossover + RSI in 50–70 range.
+
+    Assumes df has columns: rsi, macd, macd_signal.
+    Uses the last two rows of macd/macd_signal for the crossover check.
+    """
+    current_rsi = df["rsi"].iloc[-1]
+    current_macd = df["macd"].iloc[-1]
+    current_signal = df["macd_signal"].iloc[-1]
+
+    macd_crossover = (
+        current_macd > current_signal
+        and df["macd"].iloc[-2] <= df["macd_signal"].iloc[-2]
+    )
+    rsi_in_range = 50 < current_rsi < 70
+
+    passed = macd_crossover and rsi_in_range
+
+    return {
+        "passed": bool(passed),
+        "label": "MACD crossover + RSI 50–70",
+        "extra": {
+            "macd_crossover": bool(macd_crossover),
+            "rsi_in_range": bool(rsi_in_range),
+        },
+    }
+
+
+def _find_swing_lows(series: pd.Series, lookback: int = 60) -> list[int]:
+    """Find indices of local swing lows in the last `lookback` bars.
+
+    Simple definition: close[i] < close[i-1] and close[i] < close[i+1].
+    Returns indices relative to the full DataFrame index (not re-based).
+    """
+    if len(series) < 3:
+        return []
+
+    tail = series.iloc[-lookback:]
+    lows: list[int] = []
+
+    for i in range(1, len(tail) - 1):
+        if tail.iloc[i] < tail.iloc[i - 1] and tail.iloc[i] < tail.iloc[i + 1]:
+            lows.append(tail.index[i])
+
+    return lows
+
+
+def macd_bullish_divergence_strategy(df: pd.DataFrame) -> StrategyResult:
+    """Strategy 2: MACD bullish divergence on daily candles.
+
+    Definition:
+    - Use last ~60 bars.
+    - Find the two most recent swing lows in price.
+    - Require:
+      * Price at second swing low < price at first swing low (lower low).
+      * MACD at second swing low > MACD at first swing low (higher MACD low).
+    """
+    if len(df) < 50:
+        return {
+            "passed": False,
+            "label": "MACD bullish divergence",
+            "extra": {"reason": "insufficient history"},
+        }
+
+    closes = df["Close"].squeeze()
+    macd_vals = df["macd"]
+    signal_vals = df["macd_signal"]
+
+    swing_lows = _find_swing_lows(closes, lookback=60)
+
+    if len(swing_lows) < 2:
+        return {
+            "passed": False,
+            "label": "MACD bullish divergence",
+            "extra": {"reason": "not enough swing lows"},
+        }
+
+    low2_idx = swing_lows[-1]
+    low1_idx = swing_lows[-2]
+
+    price1 = closes.loc[low1_idx]
+    price2 = closes.loc[low2_idx]
+    macd1 = macd_vals.loc[low1_idx]
+    macd2 = macd_vals.loc[low2_idx]
+
+    price_lower_low = price2 < price1
+    macd_higher_low = macd2 > macd1
+
+    passed = price_lower_low and macd_higher_low
+
+    current_macd = macd_vals.iloc[-1]
+    current_signal = signal_vals.iloc[-1]
+    macd_now_bullish = current_macd >= current_signal
+
+    return {
+        "passed": bool(passed),
+        "label": "MACD bullish divergence (price LL vs MACD HL)",
+        "extra": {
+            "price1": float(price1),
+            "price2": float(price2),
+            "macd1": float(macd1),
+            "macd2": float(macd2),
+            "price_lower_low": bool(price_lower_low),
+            "macd_higher_low": bool(macd_higher_low),
+            "macd_now_bullish": bool(macd_now_bullish),
+            "low1_idx": str(low1_idx),
+            "low2_idx": str(low2_idx),
+        },
+    }
+
+
+STRATEGIES: dict[str, StrategyFn] = {
+    "macd_rsi_momentum": macd_rsi_momentum_strategy,
+    "macd_bullish_divergence": macd_bullish_divergence_strategy,
+}
+
+
 def screen_tickers(
     tickers: str,
     period: str = "1y",
     interval: str = "1d",
     skip_screen: bool = False,
+    strategy_name: str = "macd_rsi_momentum",
 ) -> list[ScreeningResult]:
+    """Apply a named screening strategy to one or more tickers.
+
+    Strategies operate on daily OHLCV data with a common indicator set (RSI, MACD,
+    MACD signal, 50/200 SMAs). The strategy controls pass/fail; options selection
+    downstream is unchanged.
     """
-    Screens tickers for bullish momentum based on MACD and RSI indicators.
-    Returns a list of ScreeningResult objects with ticker information.
-    """
+    if strategy_name not in STRATEGIES:
+        raise ValueError(f"Unknown strategy '{strategy_name}'")
+
+    strategy = STRATEGIES[strategy_name]
     screened = []
 
     for ticker in tickers:
@@ -620,15 +783,9 @@ def screen_tickers(
         sma_50 = df["sma_50"].iloc[-1]
         sma_200 = df["sma_200"].iloc[-1]
 
-        # Check screening conditions
-        macd_crossover = (
-            current_macd > current_signal
-            and df["macd"].iloc[-2] <= df["macd_signal"].iloc[-2]
-        )
-        rsi_in_range = 50 < current_rsi < 70
-        passed_screen = skip_screen or (macd_crossover and rsi_in_range)
+        strategy_result = strategy(df)
+        passed_screen = skip_screen or strategy_result["passed"]
 
-        # Add to screened results if passed
         if passed_screen:
             screened.append(
                 ScreeningResult(
@@ -643,7 +800,8 @@ def screen_tickers(
             )
         else:
             print(
-                f"Skipping {ticker}: MACD={current_macd}, Signal={current_signal}, RSI={current_rsi}"
+                f"Skipping {ticker}: strategy '{strategy_name}' did not match "
+                f"(MACD={current_macd}, Signal={current_signal}, RSI={current_rsi})"
             )
 
     return screened
@@ -660,7 +818,7 @@ def screen_tickers(
     "--index",
     "index_name",
     default="nasdaq_100",
-    type=click.Choice(["nasdaq_100", "sp500", "genz", "indexes"], case_sensitive=False),
+    type=click.Choice(["nasdaq_100", "sp500", "genz", "indexes", "iraq"], case_sensitive=False),
     show_default=True,
     help="Use a dynamic list from the given index",
 )
@@ -698,6 +856,16 @@ def screen_tickers(
     help="Maximum days to expiry for options (default: 45)",
 )
 @click.option(
+    "--strategy",
+    type=click.Choice(
+        ["macd_rsi_momentum", "macd_bullish_divergence"],
+        case_sensitive=False,
+    ),
+    default="macd_rsi_momentum",
+    show_default=True,
+    help="Screening strategy to apply",
+)
+@click.option(
     "--skip-screen",
     is_flag=True,
     help="Skip the screening step, just apply options selection",
@@ -710,6 +878,7 @@ def main(
     max_delta: float,
     min_expiry: int,
     max_expiry: int,
+    strategy: str,
     skip_screen: bool,
 ):
     """
@@ -726,12 +895,20 @@ def main(
         REPORTS_DIR / f"screening_review_{run_timestamp.strftime('%Y%m%d_%H%M%S')}.html"
     )
 
+    print("\n" + "=" * 80)
+    print(f"🔍 Using screening strategy: {strategy}")
+    print("=" * 80)
+
     if tickers:
         ticker_list = [_normalize_ticker(ticker) for ticker in tickers.split(",")]
     else:
         ticker_list = get_index_constituents(index_name)
 
-    screened = screen_tickers(ticker_list, skip_screen=skip_screen)
+    screened = screen_tickers(
+        ticker_list,
+        skip_screen=skip_screen,
+        strategy_name=strategy,
+    )
     # Display screened tickers
     screen_df = pd.DataFrame([result.model_dump() for result in screened])
     print("\n" + "=" * 80)
