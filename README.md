@@ -8,7 +8,7 @@ I got interested in options trading strategies so I [started with this ChatGPT S
 ```bash
 # Install dependencies
 uv sync
-```
+```;
 
 ## Usage
 

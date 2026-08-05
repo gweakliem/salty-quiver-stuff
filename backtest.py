@@ -282,7 +282,9 @@ def run_backtest(
         total_return_pct=round(total_return * 100, 2),
         cagr_pct=round(annualized_return(total_return, len(equity_df)) * 100, 2),
         max_drawdown_pct=(
-            round(max_drawdown(equity_df["equity"]) * 100, 2) if not equity_df.empty else 0.0
+            round(max_drawdown(equity_df["equity"]) * 100, 2)
+            if not equity_df.empty
+            else 0.0
         ),
         sharpe=round(sharpe, 3),
         sortino=round(sortino, 3),

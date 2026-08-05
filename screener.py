@@ -52,6 +52,11 @@ default_lists = {
         "RKT",
         "RIVN",
         "LCID",
+        "DASH",
+        "CRWV",
+        "IREN",
+        "MNST",
+        "COIN",
     ],
     "indexes": [
         "QQQ",
@@ -73,6 +78,8 @@ default_lists = {
         "VUG",
         "VHT",
         "VYM",
+        "SLX",
+        "XLU"
     ],
     "nasdaq_100": [
         "ADBE",
@@ -177,7 +184,7 @@ default_lists = {
         "XEL",
         "ZS",
     ],
-    "iraq": [
+    "iran": [
         "LNG",
         "VG",
         "GLNG",
@@ -201,8 +208,14 @@ default_lists = {
         "LIN",
         "APD",
         "NEHC",
-        "FCX"
-        ]
+        "FCX",
+        "UAN",
+        "LXU",
+        "NTR",
+        "SU",
+        "VLO"
+    ],
+    "ai": ["AKAM", "DDOG", "XYZ", "AVGO", "TSM", "MU", "AMD", "INTC", "CRWV"],
 }
 
 INDEX_SOURCES = {
@@ -292,7 +305,8 @@ def get_index_constituents(index_name: str) -> list[str]:
         "nasdaq_100": _fetch_nasdaq_100,
         "indexes": lambda: default_lists["indexes"],
         "genz": lambda: default_lists["genz"],
-        "iraq": lambda: default_lists["iraq"],
+        "iran": lambda: default_lists["iran"],
+        "ai": lambda: default_lists["ai"],
     }
 
     if index_name not in fetchers:
@@ -818,7 +832,9 @@ def screen_tickers(
     "--index",
     "index_name",
     default="nasdaq_100",
-    type=click.Choice(["nasdaq_100", "sp500", "genz", "indexes", "iraq"], case_sensitive=False),
+    type=click.Choice(
+        ["nasdaq_100", "sp500", "genz", "indexes", "iran", "ai"], case_sensitive=False
+    ),
     show_default=True,
     help="Use a dynamic list from the given index",
 )
